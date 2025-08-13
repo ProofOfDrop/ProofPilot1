@@ -24,14 +24,21 @@ window.onMint = onMint;
 async function onConnect() {
   try {
     externalProvider = await web3Modal.connect();
-    ethersProvider = new ethers.providers.Web3Provider(externalProvider);
+
+    // Use 'any' to avoid network caching and allow seamless chainChanged handling
+    ethersProvider = new ethers.providers.Web3Provider(externalProvider, 'any');
+
+    // For injected wallets, request accounts explicitly (no-op for WC/CBW)
+    try { await ethersProvider.send('eth_requestAccounts', []); } catch (_) {}
+
     signer = ethersProvider.getSigner();
     userAddress = await signer.getAddress();
 
-    const net = await ethersProvider.getNetwork();
-    chainId = net.chainId;
+    // Robust chain detection
+    chainId = await safeGetChainId(externalProvider);
+    const netName = getChainName(chainId);
 
-    setText('walletInfo', `Wallet: ${shorten(userAddress)} · Network: ${net.name} (${chainId})`);
+    setText('walletInfo', `Wallet: ${shorten(userAddress)} · Network: ${netName} (${chainId})`);
 
     // Auto sign verification message after connect
     await autoSignMessage();
@@ -40,9 +47,20 @@ async function onConnect() {
     setDisabled('fetchBtn', false);
 
     // React to changes
-    externalProvider.on && externalProvider.on('accountsChanged', handleAccountsChanged);
-    externalProvider.on && externalProvider.on('chainChanged', handleChainChanged);
-    externalProvider.on && externalProvider.on('disconnect', resetApp);
+    if (externalProvider.on) {
+      externalProvider.on('accountsChanged', handleAccountsChanged);
+      externalProvider.on('chainChanged', async (_chainId) => {
+        // Normalize and update
+        const newId = typeof _chainId === 'string' && _chainId.startsWith('0x')
+          ? parseInt(_chainId, 16)
+          : Number(_chainId);
+        chainId = newId;
+        setText('walletInfo', `Wallet: ${shorten(userAddress)} · Network: ${getChainName(chainId)} (${chainId})`);
+        // Require deliberate re-fetch after chain change
+        setDisabled('mintBtn', true);
+      });
+      externalProvider.on('disconnect', resetApp);
+    }
   } catch (e) {
     console.error('Connect error', e);
     setHTML('walletInfo', `<span class="text-danger">Connection failed.</span>`);
@@ -81,11 +99,13 @@ async function autoSignMessage() {
 async function onFetch() {
   if (!userAddress) return;
 
-  ethersProvider = new ethers.providers.Web3Provider(externalProvider);
+  // Recreate provider with 'any' and re-detect chain via eth_chainId
+  ethersProvider = new ethers.providers.Web3Provider(externalProvider, 'any');
   signer = ethersProvider.getSigner();
-  const net = await ethersProvider.getNetwork();
-  chainId = net.chainId;
-  setText('walletInfo', `Wallet: ${shorten(userAddress)} · Network: ${net.name} (${chainId})`);
+
+  // Prefer direct chainId from wallet to avoid getNetwork throwing
+  chainId = await safeGetChainId(externalProvider);
+  setText('walletInfo', `Wallet: ${shorten(userAddress)} · Network: ${getChainName(chainId)} (${chainId})`);
 
   const metrics = await fetchAllMetrics(userAddress, chainId);
   const points = {
@@ -96,6 +116,37 @@ async function onFetch() {
     swaps: scoreDexSwaps(metrics.dexSwaps),
     balance: scoreBalance(metrics.balanceUSD)
   };
+  const total = clamp(Math.round(points.governance + points.defi + points.unique + points.airdrops + points.swaps + points.balance), 0, 100);
+  const tier = total >= 85 ? 'Platinum' : total >= 70 ? 'Gold' : total >= 50 ? 'Silver' : 'Bronze';
+
+  setText('totalScore', total);
+  setText('tierLabel', `Tier: ${tier}`);
+  setHTML('summaryText', `
+    <div><strong>Address:</strong> ${shorten(userAddress)}</div>
+    <div><strong>Chain:</strong> ${getChainName(chainId)} (${chainId})</div>
+    <div><strong>Method:</strong> Live data via The Graph, Moralis, Covalent</div>
+  `);
+  show('summarySection');
+
+  setText('m-gov', `${metrics.governanceVotes} proposal(s) voted`);
+  setText('m-defi', `${metrics.defiTx} DeFi tx`);
+  setText('m-uniq', `${metrics.uniqueContracts} contracts`);
+  setText('m-air', `${metrics.airdropsClaimed} airdrops`);
+  setText('m-swaps', `${metrics.dexSwaps} swaps`);
+  setText('m-bal', `$${metrics.balanceUSD.toFixed(2)} USD`);
+
+  setText('p-gov', `${points.governance}/20`);
+  setText('p-defi', `${points.defi}/20`);
+  setText('p-uniq', `${points.unique}/15`);
+  setText('p-air', `${points.airdrops}/15`);
+  setText('p-swaps', `${points.swaps}/15`);
+  setText('p-bal', `${points.balance}/15`);
+
+  show('breakdownSection');
+  setDisabled('mintBtn', false);
+
+  window._proofdropLastScore = { metrics, points, total, chainId, address: userAddress, chainName: getChainName(chainId) };
+}
   const total = clamp(Math.round(points.governance + points.defi + points.unique + points.airdrops + points.swaps + points.balance), 0, 100);
   const tier = total >= 85 ? 'Platinum' : total >= 70 ? 'Gold' : total >= 50 ? 'Silver' : 'Bronze';
 
@@ -384,6 +435,37 @@ function resetApp() {
 function getChainName(id) { return CHAIN_MAP[id]?.name || `Chain ${id}`; }
 function shorten(addr) { return addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : ''; }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+// Add this helper near the bottom of app.js:
+async function safeGetChainId(p) {
+  // Try EIP-1193 first
+  try {
+    const hex = await p.request({ method: 'eth_chainId' });
+    if (typeof hex === 'string' && hex.startsWith('0x')) return parseInt(hex, 16);
+    const n = Number(hex);
+    if (!Number.isNaN(n) && n > 0) return n;
+  } catch (_) {}
+
+  // Fallbacks used by some providers
+  if (p.chainId) {
+    if (typeof p.chainId === 'string' && p.chainId.startsWith('0x')) return parseInt(p.chainId, 16);
+    const n = Number(p.chainId);
+    if (!Number.isNaN(n) && n > 0) return n;
+  }
+  if (p.networkVersion) {
+    const n = Number(p.networkVersion);
+    if (!Number.isNaN(n) && n > 0) return n;
+  }
+
+  // As a last resort, ask ethers (may throw "noNetwork" on some providers)
+  try {
+    const net = await new ethers.providers.Web3Provider(p, 'any').getNetwork();
+    if (net?.chainId) return Number(net.chainId);
+  } catch (_) {}
+
+  throw new Error('Unable to detect chainId');
+}
+
 
 // DOM helpers (works after widget is injected)
 function setText(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
