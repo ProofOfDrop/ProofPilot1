@@ -11,8 +11,10 @@ const WEB3MODAL_PROVIDER_OPTIONS = {
         11155111: 'https://rpc.sepolia.org',                 // Sepolia
         80002: 'https://rpc-amoy.polygon.technology',        // Polygon Amoy
         421614: 'https://sepolia-rollup.arbitrum.io/rpc',    // Arbitrum Sepolia
-        84532: 'https://sepolia.base.org'                    // Base Sepolia
-      }
+        84532: 'https://sepolia.base.org',                    // Base Sepolia
+        1: 'wss://ethereum-rpc.publicnode.com'               //Ethereum Mainnet
+      },
+      chainId: 11155111 // default so WC v1 never returns 0
     }
   },
   coinbasewallet: {
