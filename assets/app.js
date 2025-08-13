@@ -6,6 +6,17 @@ let signer;
 let userAddress;
 let chainId;
 
+let web3Modal;
+function initWeb3Modal() {
+  web3Modal = new window.Web3Modal.default({
+    cacheProvider: false,
+    theme: 'dark',
+    providerOptions: WEB3MODAL_PROVIDER_OPTIONS
+  });
+  console.log('Web3Modal initialised');
+}
+
+
 // ====== On load: web3 modal ======
 document.addEventListener('DOMContentLoaded', () => {
   web3Modal = new window.Web3Modal.default({
